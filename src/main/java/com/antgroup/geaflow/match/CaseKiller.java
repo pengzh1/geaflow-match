@@ -139,44 +139,7 @@ public class CaseKiller {
                 curStage = 10D;
             }
             // 并发写
-            CountDownLatch writeLatch = new CountDownLatch(4);
-            es.execute(() -> {
-                try {
-                    writeFile(writers[0], RESULT_FILE_PATH + "/result1.csv", sinkOne.arrayList, 2);
-                } catch (IOException e) {
-                    LOGGER.error("writeFailed:", e);
-                } finally {
-                    writeLatch.countDown();
-                }
-            });
-            es.execute(() -> {
-                try {
-                    writeFile(writers[1], RESULT_FILE_PATH + "/result2.csv", sinkTwo.arrayList, 0);
-                } catch (IOException e) {
-                    LOGGER.error("writeFailed:", e);
-                } finally {
-                    writeLatch.countDown();
-                }
-            });
-            es.execute(() -> {
-                try {
-                    writeFile(writers[2], RESULT_FILE_PATH + "/result3.csv", sinkThree.arrayList, 2);
-                } catch (IOException e) {
-                    LOGGER.error("writeFailed:", e);
-                } finally {
-                    writeLatch.countDown();
-                }
-            });
-            es.execute(() -> {
-                try {
-                    writeFile(writers[3], RESULT_FILE_PATH + "/result4.csv", sinkFour.arrayList, 2);
-                } catch (IOException e) {
-                    LOGGER.error("writeFailed:", e);
-                } finally {
-                    writeLatch.countDown();
-                }
-            });
-            writeLatch.await();
+            writeFiles(writers, sinkOne, sinkTwo, sinkThree, sinkFour);
             if (12 > curStage) {
                 LOGGER.warn("startStage12 dur:" + (System.currentTimeMillis() - curTime));
                 curTime = System.currentTimeMillis();
@@ -184,7 +147,7 @@ public class CaseKiller {
             }
             ProcessBuilder processBuilder = new ProcessBuilder();
             System.out.println("costMs" + (System.currentTimeMillis() - start));
-            // 切腹自尽！快速结束进程
+            // 切腹自尽！快速结束进程，提升了1秒左右
             processBuilder.command("kill", "-9", ProcessUtil.getProcessId() + "");
             processBuilder.start();
             Thread.sleep(100);
@@ -225,6 +188,11 @@ public class CaseKiller {
             }
             graphWindow.compute(new PRAlgorithms(5)).compute(iterationParallelism).getVertices().sink(e -> {
                 try {
+                    if (8 > curStage) {
+                        LOGGER.warn("startStage8 dur:" + (System.currentTimeMillis() - curTime));
+                        curTime = System.currentTimeMillis();
+                        curStage = 8D;
+                    }
                     if (StringUtils.isNotBlank(e.getValue())) {
                         String[] xx = e.getValue().split("&");
                         // case1
@@ -335,6 +303,7 @@ public class CaseKiller {
             @Override
             public void finish() {
             }
+
             @Override
             public void compute(Integer vertexId, Iterator<MValue> messageIterator) {
                 if (context != null) {
@@ -342,6 +311,11 @@ public class CaseKiller {
                     try {
                         switch ((int) context.getIterationId()) {
                             case 1:
+                                if (3 > curStage) {
+                                    LOGGER.warn("startStage3 dur:" + (System.currentTimeMillis() - curTime));
+                                    curTime = System.currentTimeMillis();
+                                    curStage = 3D;
+                                }
                                 // 第一次迭代处理
                                 if (vertex.getId() > loanStart) {
                                     String val = vertex.getId() + "-" + vertex.getValue();
@@ -396,6 +370,11 @@ public class CaseKiller {
                                 }
                                 break;
                             case 2:
+                                if (4 > curStage) {
+                                    LOGGER.warn("startStage4 dur:" + (System.currentTimeMillis() - curTime));
+                                    curTime = System.currentTimeMillis();
+                                    curStage = 4D;
+                                }
                                 // 第二次迭代处理
                                 // Case1 account节点处理loan消息，并把loanMap传递给所有transferAccount
                                 // Case2 account节点处理自己收到的transferCntMap，即dst->other数量
@@ -477,6 +456,11 @@ public class CaseKiller {
                                 }
                                 break;
                             case 3:
+                                if (5 > curStage) {
+                                    LOGGER.warn("startStage5 dur:" + (System.currentTimeMillis() - curTime));
+                                    curTime = System.currentTimeMillis();
+                                    curStage = 5D;
+                                }
                                 // 第三次迭代处理
                                 // Case1: account节点处理loanMap消息，并把loanMap传递给ownPerson
                                 if (vertex.getId() > accountStart && vertex.getId() < loanStart) {
@@ -520,6 +504,11 @@ public class CaseKiller {
                                 }
                                 break;
                             case 4:
+                                if (6 > curStage) {
+                                    LOGGER.warn("startStage6 dur:" + (System.currentTimeMillis() - curTime));
+                                    curTime = System.currentTimeMillis();
+                                    curStage = 6D;
+                                }
                                 // 第四次迭代处理
                                 // Case1: person节点处理loanMap消息，计算贷款总额
                                 // Case4  person节点处理担保子节点贷款金额Map，汇总后再向担保父节点传递贷款金额Map
@@ -574,6 +563,11 @@ public class CaseKiller {
                                 }
                                 break;
                             case 5:
+                                if (7 > curStage) {
+                                    LOGGER.warn("startStage7 dur:" + (System.currentTimeMillis() - curTime));
+                                    curTime = System.currentTimeMillis();
+                                    curStage = 7D;
+                                }
                                 // Case4  person节点处理担保子节点贷款金额Map，汇总计算结果
                                 // 此时person节点拿到了所有1级、2级、3级子节点的申请贷款金额
                                 if (vertex.getId() < accountStart) {
@@ -781,6 +775,47 @@ public class CaseKiller {
                 LOGGER.error("xxxx", e);
             }
         });
+    }
+
+    public static void writeFiles(BufferedWriter[] writers, MemSinkOne sinkOne, MemSinkTwo sinkTwo, MemSinkThree sinkThree, MemSinkFour sinkFour) throws InterruptedException {
+        CountDownLatch writeLatch = new CountDownLatch(4);
+        es.execute(() -> {
+            try {
+                writeFile(writers[0], RESULT_FILE_PATH + "/result1.csv", sinkOne.arrayList, 2);
+            } catch (IOException e) {
+                LOGGER.error("writeFailed:", e);
+            } finally {
+                writeLatch.countDown();
+            }
+        });
+        es.execute(() -> {
+            try {
+                writeFile(writers[1], RESULT_FILE_PATH + "/result2.csv", sinkTwo.arrayList, 0);
+            } catch (IOException e) {
+                LOGGER.error("writeFailed:", e);
+            } finally {
+                writeLatch.countDown();
+            }
+        });
+        es.execute(() -> {
+            try {
+                writeFile(writers[2], RESULT_FILE_PATH + "/result3.csv", sinkThree.arrayList, 2);
+            } catch (IOException e) {
+                LOGGER.error("writeFailed:", e);
+            } finally {
+                writeLatch.countDown();
+            }
+        });
+        es.execute(() -> {
+            try {
+                writeFile(writers[3], RESULT_FILE_PATH + "/result4.csv", sinkFour.arrayList, 2);
+            } catch (IOException e) {
+                LOGGER.error("writeFailed:", e);
+            } finally {
+                writeLatch.countDown();
+            }
+        });
+        writeLatch.await();
     }
 
     public static void writeFile(BufferedWriter dataWriter, String path, ConcurrentLinkedQueue<IVertex<Integer, String>> outData, int scale) throws IOException {

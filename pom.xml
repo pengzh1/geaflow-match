@@ -120,7 +120,7 @@
                     <archive>
                         <manifest>
                             <addClasspath>true</addClasspath>
-                            <mainClass>com.antgroup.geaflow.example.graph.statical.compute.caseone.CaseKiller
+                            <mainClass>com.antgroup.geaflow.match.CaseKiller
                             </mainClass> <!-- 你的主类名 -->
                         </manifest>
                     </archive>
