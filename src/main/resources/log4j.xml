@@ -5,18 +5,18 @@
         <layout class="org.apache.log4j.PatternLayout">
             <param name="ConversionPattern" value="%d{HH:mm:ss,SS} %-5p (%C{1}:%M) - %m%n"/>
         </layout>
-        <!--过滤器设置输出的级别-->
+        <!-- Filter restricting the levels that are output. -->
         <filter class="org.apache.log4j.varia.LevelRangeFilter">
-            <!-- 设置日志输出的最小级别 -->
+            <!-- Minimum log level to output. -->
             <param name="levelMin" value="DEBUG"/>
-            <!-- 设置日志输出的最大级别 -->
+            <!-- Maximum log level to output. -->
             <param name="levelMax" value="ERROR"/>
-            <!-- 设置日志输出的xxx，默认是false -->
+            <!-- Whether matching events are accepted; defaults to false. -->
             <param name="AcceptOnMatch" value="true"/>
         </filter>
     </appender>
 
-    <!-- 默认配置，级别为debug 且根据name为log.console和 log.file两个appender输出-->
+    <!-- Default configuration: debug level, output via the log.console appender. -->
     <root>
         <level value="debug"/>
         <appender-ref ref="log.console"/>

@@ -89,9 +89,9 @@ public class CaseKiller {
         try {
             if (args.length > 0) REF_FILE_PATH = args[0];
             if (args.length > 1) RESULT_FILE_PATH = args[1];
-            // 预读取
+            // Pre-read the input data.
             readAllData();
-            // 预创建文件
+            // Pre-create the result files.
             BufferedWriter[] writers = new BufferedWriter[4];
             for (int i = 0; i < 4; i++) {
                 int finalI = i;
@@ -122,7 +122,8 @@ public class CaseKiller {
             conf.put("brpc.connection.keep.alive.time.sec", "1000");
             conf.put("brpc.io.thread.num", "8");
             setDefaultOption();
-            // MemSink可能会被创建出多个实例，因此只能使用Static静态变量存储结果，进而只能每一个结果集创建一个MemSink类
+            // The framework may instantiate a sink more than once, so results must be held in static fields;
+            // hence one dedicated MemSink class per result set.
             MemSinkOne<IVertex<Integer, String>> sinkOne = new MemSinkOne<>();
             MemSinkTwo<IVertex<Integer, String>> sinkTwo = new MemSinkTwo<>();
             MemSinkThree<IVertex<Integer, String>> sinkThree = new MemSinkThree<>();
@@ -138,7 +139,7 @@ public class CaseKiller {
                 curTime = System.currentTimeMillis();
                 curStage = 10D;
             }
-            // 并发写
+            // Write the result files concurrently.
             writeFiles(writers, sinkOne, sinkTwo, sinkThree, sinkFour);
             if (12 > curStage) {
                 LOGGER.warn("startStage12 dur:" + (System.currentTimeMillis() - curTime));
@@ -147,7 +148,7 @@ public class CaseKiller {
             }
             ProcessBuilder processBuilder = new ProcessBuilder();
             System.out.println("costMs" + (System.currentTimeMillis() - start));
-            // 切腹自尽！快速结束进程，提升了1秒左右
+            // Terminate the process immediately instead of waiting for a graceful JVM shutdown; saves about 1 second.
             processBuilder.command("kill", "-9", ProcessUtil.getProcessId() + "");
             processBuilder.start();
             Thread.sleep(100);
@@ -171,8 +172,8 @@ public class CaseKiller {
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
-            PWindowSource<IVertex<Integer, String>> personVts = pipelineTaskCxt.buildSource(new CollectionSource<>(vertexList), AllWindow.getInstance()).withParallelism(readParallel);
-            PWindowSource<IEdge<Integer, Integer>> prEdges = pipelineTaskCxt.buildSource(new CollectionSource<>(edgeList), AllWindow.getInstance()).withParallelism(readParallel);
+            PWindowSource<IVertex<Integer, String>> personVertices = pipelineTaskCxt.buildSource(new CollectionSource<>(vertexList), AllWindow.getInstance()).withParallelism(readParallel);
+            PWindowSource<IEdge<Integer, Integer>> inputEdges = pipelineTaskCxt.buildSource(new CollectionSource<>(edgeList), AllWindow.getInstance()).withParallelism(readParallel);
             if (1 > curStage) {
                 LOGGER.warn("startStage1 dur:" + (System.currentTimeMillis() - curTime));
                 curTime = System.currentTimeMillis();
@@ -180,7 +181,7 @@ public class CaseKiller {
             }
             int iterationParallelism = itrParallel;
             GraphViewDesc graphViewDesc = GraphViewBuilder.createGraphView(GraphViewBuilder.DEFAULT_GRAPH).withShardNum(iterationParallelism).withBackend(BackendType.Memory).build();
-            PGraphWindow<Integer, String, Integer> graphWindow = pipelineTaskCxt.buildWindowStreamGraph(personVts, prEdges, graphViewDesc);
+            PGraphWindow<Integer, String, Integer> graphWindow = pipelineTaskCxt.buildWindowStreamGraph(personVertices, inputEdges, graphViewDesc);
             if (2 > curStage) {
                 LOGGER.warn("startStage2 dur:" + (System.currentTimeMillis() - curTime));
                 curTime = System.currentTimeMillis();
@@ -194,30 +195,33 @@ public class CaseKiller {
                         curStage = 8D;
                     }
                     if (StringUtils.isNotBlank(e.getValue())) {
-                        String[] xx = e.getValue().split("&");
-                        // case1
+                        String[] valueParts = e.getValue().split("&");
+                        // case 1
                         if (e.getId() < accountStart) {
-                            // person 节点数据解析，case1在前,
-                            if (xx.length > 0 && !xx[0].contains("-") && StringUtils.isNotBlank(xx[0])) {
-                                sinkOne.write(new PVertex(e.getId(), xx[0]));
+                            // Parse the person vertex value; the case-1 result comes first.
+                            if (valueParts.length > 0 && !valueParts[0].contains("-") && StringUtils.isNotBlank(valueParts[0])) {
+                                sinkOne.write(new PVertex(e.getId(), valueParts[0]));
                             }
-                            // case4，编码格式 “loanIDA-loanAmountA|loanIDB-loanAmountB|loanIDC-loanAmountC”
-                            // case4 由于无法在3 4迭代内确认第五轮迭代还会不会收到三级担保子节点的消息，所以不能提前计算
-                            // 但是第五轮迭代只有有三级担保子节点的person会收到消息，在第五轮直接计算赋值也不能覆盖所有有担保子节点的person
-                            // 所以只能每个person在迭代过程中，将收到的所有1-3级子节点的loan，都存在顶点属性中，在最终的sink计算时遍历加和，输出
+                            // Case 4, encoded as "loanIdA-loanAmountA|loanIdB-loanAmountB|loanIdC-loanAmountC".
+                            // During iterations 3-4 a person cannot yet know whether a level-3 guaranteed child
+                            // will still deliver a message in iteration 5, so the value cannot be computed early;
+                            // and in iteration 5 only persons with level-3 guaranteed children receive messages,
+                            // so computing the sum there would not cover every person with guaranteed children.
+                            // Instead, each person keeps the loans of all level 1-3 guaranteed children in its
+                            // vertex value during the iterations, and this final sink sums them for output.
                             if (e.getValue().contains("-")) {
-                                double d = Arrays.stream(xx[xx.length - 1].split("\\|")).distinct().filter(StringUtils::isNotBlank).mapToDouble(x -> Double.parseDouble(x.split("-")[1])).sum();
-                                sinkFour.write(new PVertex(e.getId(), BigDecimal.valueOf(d / (10000 * 10000)).setScale(2, RoundingMode.HALF_UP).toPlainString()));
+                                double loanSum = Arrays.stream(valueParts[valueParts.length - 1].split("\\|")).distinct().filter(StringUtils::isNotBlank).mapToDouble(entry -> Double.parseDouble(entry.split("-")[1])).sum();
+                                sinkFour.write(new PVertex(e.getId(), BigDecimal.valueOf(loanSum / (10000 * 10000)).setScale(2, RoundingMode.HALF_UP).toPlainString()));
                             }
                         } else if (e.getId() < loanStart) {
-                            if (xx.length > 0 && !xx[0].contains("-")) {
-                                // case3
-                                if (xx[0].length() > 0) {
-                                    sinkThree.write(new PVertex(e.getId(), xx[0]));
+                            if (valueParts.length > 0 && !valueParts[0].contains("-")) {
+                                // case 3
+                                if (valueParts[0].length() > 0) {
+                                    sinkThree.write(new PVertex(e.getId(), valueParts[0]));
                                 }
-                                // case2
-                                if (xx.length > 1 && !xx[1].contains("-") && !xx[1].equals("0")) {
-                                    sinkTwo.write(new PVertex(e.getId(), xx[1]));
+                                // case 2
+                                if (valueParts.length > 1 && !valueParts[1].contains("-") && !valueParts[1].equals("0")) {
+                                    sinkTwo.write(new PVertex(e.getId(), valueParts[1]));
                                 }
                             }
                         }
@@ -230,7 +234,7 @@ public class CaseKiller {
         return pipeline.execute();
     }
 
-    // 自定义跨节点消息编码类，加速序列化效率
+    // Custom encoder for cross-node messages; faster than generic serialization.
     public static class MEncoder extends AbstractEncoder<MValue> {
         @Override
         public void encode(MValue data, OutputStream outputStream) throws IOException {
@@ -260,11 +264,11 @@ public class CaseKiller {
             mValue.valMapStr = Encoders.STRING.decode(inputStream);
             int size = Encoders.INTEGER.decode(inputStream) - 1;
             if (size > 0) {
-                Map<Integer, Double> vmap = new HashMap<>(size);
+                Map<Integer, Double> valueMap = new HashMap<>(size);
                 for (int i = 0; i < size; i++) {
-                    vmap.put(Encoders.INTEGER.decode(inputStream), Encoders.DOUBLE.decode(inputStream));
+                    valueMap.put(Encoders.INTEGER.decode(inputStream), Encoders.DOUBLE.decode(inputStream));
                 }
-                mValue.valMap = vmap;
+                mValue.valMap = valueMap;
             }
             return mValue;
         }
@@ -316,29 +320,29 @@ public class CaseKiller {
                                     curTime = System.currentTimeMillis();
                                     curStage = 3D;
                                 }
-                                // 第一次迭代处理
+                                // Iteration 1.
                                 if (vertex.getId() > loanStart) {
                                     String val = vertex.getId() + "-" + vertex.getValue();
-                                    Double dd = Double.parseDouble(vertex.getValue());
+                                    Double loanAmount = Double.parseDouble(vertex.getValue());
                                     List<IEdge<Integer, Integer>> edges = context.edges().getEdges();
-                                    Set<Integer> sended1 = new HashSet<>();
+                                    Set<Integer> sentTargets = new HashSet<>();
                                     for (IEdge<Integer, Integer> edge : edges) {
-                                        // Case1 loan节点发送消息到所有depositAccount
+                                        // Case 1: loan vertices send a message to every deposit account.
                                         if (edge.getDirect() == EdgeDirection.OUT && edge.getValue().equals(eValueZero3)) {
-                                            if (!sended1.contains(edge.getTargetId())) {
-                                                sended1.add(edge.getTargetId());
-                                                context.sendMessage(edge.getTargetId(), MValue.depositLoanMap(vertex.getId(), dd));
+                                            if (!sentTargets.contains(edge.getTargetId())) {
+                                                sentTargets.add(edge.getTargetId());
+                                                context.sendMessage(edge.getTargetId(), MValue.depositLoanMap(vertex.getId(), loanAmount));
                                             }
                                         }
-                                        // Case4 loan节点发送消息到所有applyAccount
+                                        // Case 4: loan vertices send their id and amount to every person that applied for the loan.
                                         if (edge.getDirect() == EdgeDirection.IN && edge.getValue().equals(eValueZero8)) {
                                             context.sendMessage(edge.getTargetId(), MValue.applyLoanMap(val));
                                         }
                                     }
                                 }
-                                // Case2 account节点将自己收到的transferAccount及次数传递给下一跳转账客户
-                                // 这样所有src节点都拿到了，dst->other这个edge2的数量
-                                // Case3 计算inEdge7 outEdge2 比值
+                                // Case 2: each account forwards the transfer counts it received to the next-hop
+                                // transfer accounts, so every src account learns the dst->other edge counts.
+                                // Case 3: compute the ratio of incoming to outgoing transfer amounts.
                                 else if (vertex.getId() > accountStart) {
                                     List<IEdge<Integer, Integer>> edges = context.edges().getEdges();
                                     Double in = 0D;
@@ -359,10 +363,10 @@ public class CaseKiller {
                                         context.setNewVertexValue(BigDecimal.valueOf(in / out).setScale(2, RoundingMode.HALF_UP).toPlainString());
                                     }
                                     if (transferCnt.size() > 0) {
-                                        Set<Integer> sended = new HashSet<>();
+                                        Set<Integer> sentTargets = new HashSet<>();
                                         for (IEdge<Integer, Integer> edge : edges) {
-                                            if (edge.getDirect() == EdgeDirection.OUT && edge.getValue() < eValueZero1 && !sended.contains(edge.getTargetId())) {
-                                                sended.add(edge.getTargetId());
+                                            if (edge.getDirect() == EdgeDirection.OUT && edge.getValue() < eValueZero1 && !sentTargets.contains(edge.getTargetId())) {
+                                                sentTargets.add(edge.getTargetId());
                                                 context.sendMessage(edge.getTargetId(), MValue.transferCntMap(vertex.getId(), transferCnt));
                                             }
                                         }
@@ -375,10 +379,10 @@ public class CaseKiller {
                                     curTime = System.currentTimeMillis();
                                     curStage = 4D;
                                 }
-                                // 第二次迭代处理
-                                // Case1 account节点处理loan消息，并把loanMap传递给所有transferAccount
-                                // Case2 account节点处理自己收到的transferCntMap，即dst->other数量
-                                // 然后开始计算src->dst->other->src 环路数量
+                                // Iteration 2.
+                                // Case 1: accounts merge the received loan maps and forward them along transfer edges.
+                                // Case 2: accounts process the received transfer-count maps (the dst->other counts),
+                                // then compute the number of src->dst->other->src cycles.
                                 if (vertex.getId() > accountStart && vertex.getId() < loanStart) {
                                     if (messageIterator.hasNext()) {
                                         List<IEdge<Integer, Integer>> edges = context.edges().getEdges();
@@ -433,8 +437,9 @@ public class CaseKiller {
                                         context.setNewVertexValue(vertex.getValue() + "&" + cnt);
                                     }
                                 }
-                                // Case4 person节点处理loan消息，往“担保父节点”发送自身申请的贷款金额Map
-                                // 此时person节点拿到了自己申请的所有贷款金额
+                                // Case 4: persons process loan messages and send the map of their own applied loans
+                                // to their guarantor parents. At this point each person holds the amounts of all
+                                // the loans it applied for.
                                 else if (vertex.getId() < accountStart) {
                                     if (messageIterator.hasNext()) {
                                         List<IEdge<Integer, Integer>> inEdges = context.edges().getInEdges();
@@ -461,27 +466,27 @@ public class CaseKiller {
                                     curTime = System.currentTimeMillis();
                                     curStage = 5D;
                                 }
-                                // 第三次迭代处理
-                                // Case1: account节点处理loanMap消息，并把loanMap传递给ownPerson
+                                // Iteration 3.
+                                // Case 1: accounts merge the received loan maps and forward them to their owning person.
                                 if (vertex.getId() > accountStart && vertex.getId() < loanStart) {
                                     List<IEdge<Integer, Integer>> inEdges = context.edges().getInEdges();
-                                    Map<Integer, Double> longDoubleMap = null;
+                                    Map<Integer, Double> loanAmountMap = null;
                                     while (messageIterator.hasNext()) {
                                         MValue mValue = messageIterator.next();
-                                        if (longDoubleMap == null) {
-                                            longDoubleMap = mValue.valMap;
+                                        if (loanAmountMap == null) {
+                                            loanAmountMap = mValue.valMap;
                                         } else {
-                                            longDoubleMap.putAll(mValue.valMap);
+                                            loanAmountMap.putAll(mValue.valMap);
                                         }
                                     }
                                     for (IEdge<Integer, Integer> edge : inEdges) {
                                         if (edge.getValue().equals(eValueZero1)) {
-                                            context.sendMessage(edge.getTargetId(), MValue.depositLoanMap(longDoubleMap));
+                                            context.sendMessage(edge.getTargetId(), MValue.depositLoanMap(loanAmountMap));
                                         }
                                     }
                                 }
-                                // Case4 person节点处理loan消息，往“担保父节点”发送自身申请的贷款金额Map
-                                // 此时person节点可以拿到所有1级子节点的申请贷款金额
+                                // Case 4: persons forward the accumulated applied-loan map to their guarantor parents,
+                                // so each person receives the applied loans of all its level-1 guaranteed children.
                                 else if (vertex.getId() < accountStart) {
                                     if (messageIterator.hasNext()) {
                                         List<IEdge<Integer, Integer>> inEdges = context.edges().getInEdges();
@@ -509,54 +514,55 @@ public class CaseKiller {
                                     curTime = System.currentTimeMillis();
                                     curStage = 6D;
                                 }
-                                // 第四次迭代处理
-                                // Case1: person节点处理loanMap消息，计算贷款总额
-                                // Case4  person节点处理担保子节点贷款金额Map，汇总后再向担保父节点传递贷款金额Map
-                                // 此时person节点可以拿到所有2级子节点的申请贷款金额
+                                // Iteration 4.
+                                // Case 1: persons merge the received loan maps and compute the total loan amount.
+                                // Case 4: persons merge the loan maps of guaranteed children and forward the aggregated
+                                // map to their guarantor parents. At this point each person holds the applied loans
+                                // of all its level-2 guaranteed children.
                                 if (vertex.getId() < accountStart) {
-                                    Map<Integer, Double> longDoubleMap = null;
-                                    StringBuilder curStr = new StringBuilder();
+                                    Map<Integer, Double> loanAmountMap = null;
+                                    StringBuilder loanEntries = new StringBuilder();
                                     if (vertex.getValue().contains("-")) {
-                                        curStr.append(vertex.getValue());
+                                        loanEntries.append(vertex.getValue());
                                     }
                                     while (messageIterator.hasNext()) {
                                         MValue mValue = messageIterator.next();
                                         if (mValue.typ == 1 && mValue.valMap != null && mValue.valMap.size() > 0) {
-                                            if (longDoubleMap == null) {
-                                                longDoubleMap = mValue.valMap;
+                                            if (loanAmountMap == null) {
+                                                loanAmountMap = mValue.valMap;
                                             } else {
-                                                longDoubleMap.putAll(mValue.valMap);
+                                                loanAmountMap.putAll(mValue.valMap);
                                             }
                                         }
                                         if (mValue.typ == 2 && StringUtils.isNotBlank(mValue.valMapStr)) {
-                                            curStr.append("|").append(mValue.valMapStr);
+                                            loanEntries.append("|").append(mValue.valMapStr);
                                         }
                                     }
-                                    String cur = curStr.toString();
-                                    double v = 0;
-                                    if (longDoubleMap != null && longDoubleMap.size() > 0) {
-                                        for (Double d : longDoubleMap.values()) {
-                                            v += d;
+                                    String loanEntriesStr = loanEntries.toString();
+                                    double loanTotal = 0;
+                                    if (loanAmountMap != null && loanAmountMap.size() > 0) {
+                                        for (Double amount : loanAmountMap.values()) {
+                                            loanTotal += amount;
                                         }
                                     }
-                                    if (v > 0) {
-                                        if (StringUtils.isNotBlank(cur)) {
-                                            context.setNewVertexValue(BigDecimal.valueOf(v / (10000 * 10000)).setScale(2, RoundingMode.HALF_UP).toPlainString() + "&" + cur);
+                                    if (loanTotal > 0) {
+                                        if (StringUtils.isNotBlank(loanEntriesStr)) {
+                                            context.setNewVertexValue(BigDecimal.valueOf(loanTotal / (10000 * 10000)).setScale(2, RoundingMode.HALF_UP).toPlainString() + "&" + loanEntriesStr);
                                         } else {
-                                            context.setNewVertexValue(BigDecimal.valueOf(v / (10000 * 10000)).setScale(2, RoundingMode.HALF_UP).toPlainString());
+                                            context.setNewVertexValue(BigDecimal.valueOf(loanTotal / (10000 * 10000)).setScale(2, RoundingMode.HALF_UP).toPlainString());
                                         }
                                     } else {
-                                        if (StringUtils.isNotBlank(cur)) {
-                                            context.setNewVertexValue("&" + cur);
+                                        if (StringUtils.isNotBlank(loanEntriesStr)) {
+                                            context.setNewVertexValue("&" + loanEntriesStr);
                                         } else {
                                             context.setNewVertexValue("&");
                                         }
                                     }
-                                    if (cur.length() > 0) {
+                                    if (loanEntriesStr.length() > 0) {
                                         List<IEdge<Integer, Integer>> inEdges = context.edges().getInEdges();
                                         for (IEdge<Integer, Integer> edge : inEdges) {
                                             if (edge.getValue().equals(eValueZero9)) {
-                                                context.sendMessage(edge.getTargetId(), MValue.applyLoanMap(cur));
+                                                context.sendMessage(edge.getTargetId(), MValue.applyLoanMap(loanEntriesStr));
                                             }
                                         }
                                     }
@@ -568,30 +574,30 @@ public class CaseKiller {
                                     curTime = System.currentTimeMillis();
                                     curStage = 7D;
                                 }
-                                // Case4  person节点处理担保子节点贷款金额Map，汇总计算结果
-                                // 此时person节点拿到了所有1级、2级、3级子节点的申请贷款金额
+                                // Case 4: persons merge the loan maps received from guaranteed children.
+                                // At this point each person holds the applied loans of all level 1-3 guaranteed children.
                                 if (vertex.getId() < accountStart) {
-                                    String[] xx = vertex.getValue().split("&");
-                                    StringBuilder stb = new StringBuilder();
+                                    String[] valueParts = vertex.getValue().split("&");
+                                    StringBuilder loanEntries = new StringBuilder();
                                     boolean haveMap = vertex.getValue().contains("-");
                                     if (haveMap) {
-                                        stb.append(xx[xx.length - 1]);
+                                        loanEntries.append(valueParts[valueParts.length - 1]);
                                     }
                                     while (messageIterator.hasNext()) {
                                         MValue mValue = messageIterator.next();
                                         if (mValue.typ == 2 && StringUtils.isNotBlank(mValue.valMapStr)) {
-                                            stb.append("|").append(mValue.valMapStr);
+                                            loanEntries.append("|").append(mValue.valMapStr);
                                         }
                                     }
                                     if (haveMap) {
-                                        xx[xx.length - 1] = stb.toString();
-                                        if (xx.length == 1) {
-                                            context.setNewVertexValue("&" + xx[0]);
+                                        valueParts[valueParts.length - 1] = loanEntries.toString();
+                                        if (valueParts.length == 1) {
+                                            context.setNewVertexValue("&" + valueParts[0]);
                                         } else {
-                                            context.setNewVertexValue(StringUtils.join(xx, "&"));
+                                            context.setNewVertexValue(StringUtils.join(valueParts, "&"));
                                         }
                                     } else {
-                                        context.setNewVertexValue(vertex.getValue() + "&" + stb);
+                                        context.setNewVertexValue(vertex.getValue() + "&" + loanEntries);
                                     }
 
                                 }
@@ -618,18 +624,20 @@ public class CaseKiller {
                 File accountFile = new File(account);
                 File loanFile = new File(loan);
                 CountDownLatch latch = new CountDownLatch(3);
-                // 优化策略：
-                // 1.使用文件“行号”代替原有ID，加速id索引效率，不同类型节点再加上不同的初始值，进而可以使用“号段”区分类型
-                // 2.只有Loan节点需要读取loanAmount这一属性值，其他节点不需要读取属性
-                // 3.只有accountTransferAccount边需要读取属性转账金额，其他边不需要读取属性
-                // 4.使用多线程并发读取
+                // Optimization strategy:
+                // 1. Replace the original IDs with file line numbers for faster ID indexing; each node type gets a
+                //    distinct numeric offset, so the ID range itself encodes the node type.
+                // 2. Only loan vertices need an attribute (loanAmount); other vertices are loaded without attributes.
+                // 3. Only account-transfer-account edges need an attribute (the transfer amount); other edges are
+                //    loaded without attributes.
+                // 4. Read the files concurrently on multiple threads.
                 es.execute(() -> {
                     try {
-                        AtomicInteger num = new AtomicInteger(personStart);
+                        AtomicInteger nextId = new AtomicInteger(personStart);
                         BufferedReader personReader = new BufferedReader(new InputStreamReader(Files.newInputStream(personFile.toPath())));
                         vertexList.addAll(personReader.lines().filter(e -> !e.startsWith("personId")).map(e -> {
                             String[] fields = e.split("\\|");
-                            int id = num.addAndGet(1);
+                            int id = nextId.addAndGet(1);
                             Long idx = Long.parseLong(fields[0]);
                             idMap.put(id, idx);
                             idRvtMap1.put(idx, id);
@@ -643,11 +651,11 @@ public class CaseKiller {
                 });
                 es.execute(() -> {
                     try {
-                        AtomicInteger num = new AtomicInteger(accountStart);
+                        AtomicInteger nextId = new AtomicInteger(accountStart);
                         BufferedReader accountReader = new BufferedReader(new InputStreamReader(Files.newInputStream(accountFile.toPath())));
                         vertexList.addAll(accountReader.lines().parallel().filter(e -> e.charAt(0) < 90).map(e -> {
                             String[] fields = e.split("\\|");
-                            int id = num.addAndGet(1);
+                            int id = nextId.addAndGet(1);
                             Long idx = Long.parseLong(fields[0]);
                             idMap.put(id, idx);
                             idRvtMap2.put(idx, id);
@@ -661,11 +669,11 @@ public class CaseKiller {
                 });
                 es.execute(() -> {
                     try {
-                        AtomicInteger num = new AtomicInteger(loanStart);
+                        AtomicInteger nextId = new AtomicInteger(loanStart);
                         BufferedReader loanReader = new BufferedReader(new InputStreamReader(Files.newInputStream(loanFile.toPath())));
                         vertexList.addAll(loanReader.lines().filter(e -> !e.startsWith("loanId")).map(e -> {
                             String[] fields = e.split("\\|");
-                            int id = num.addAndGet(1);
+                            int id = nextId.addAndGet(1);
                             Long idx = Long.parseLong(fields[0]);
                             idMap.put(id, idx);
                             idRvtMap3.put(idx, id);
@@ -702,22 +710,22 @@ public class CaseKiller {
                         latch2.countDown();
                     }
                 });
-                BigDecimal oneH = new BigDecimal(100);
+                BigDecimal hundred = new BigDecimal(100);
                 es.execute(() -> {
                     try {
-                        long st = System.currentTimeMillis();
+                        long startTime = System.currentTimeMillis();
                         BufferedReader accountReader = new BufferedReader(new InputStreamReader(Files.newInputStream(accountTransferFile.toPath())));
                         edgeList.addAll(accountReader.lines().parallel().flatMap(e -> {
                             if (e.charAt(0) > 90) {
                                 return Stream.of();
                             }
                             String[] fields = e.split("\\|");
-                            Integer val = new BigDecimal(fields[2]).multiply(oneH).setScale(0, RoundingMode.HALF_UP).intValue();
+                            Integer val = new BigDecimal(fields[2]).multiply(hundred).setScale(0, RoundingMode.HALF_UP).intValue();
                             IEdge<Integer, Integer> e1 = new PEdge(idRvtMap2.get(Long.parseLong(fields[0])), idRvtMap2.get(Long.parseLong(fields[1])), val, true);
                             IEdge<Integer, Integer> e2 = new PEdge(idRvtMap2.get(Long.parseLong(fields[1])), idRvtMap2.get(Long.parseLong(fields[0])), val, false);
                             return Stream.of(e1, e2);
                         }).collect(Collectors.toList()));
-                        LOGGER.info("readAccount {}", System.currentTimeMillis() - st);
+                        LOGGER.info("readAccount {}", System.currentTimeMillis() - startTime);
                     } catch (Exception e) {
                         LOGGER.error("readError", e);
                     } finally {
@@ -937,10 +945,10 @@ public class CaseKiller {
         clientOption.setLoadBalanceType(LoadBalanceStrategy.LOAD_BALANCE_FAIR);
         clientOption.setCompressType(Options.CompressType.COMPRESS_TYPE_NONE);
         clientOption.setChannelType(ChannelType.POOLED_CONNECTION);
-        DefaultClientOption p = new DefaultClientOption();
+        DefaultClientOption defaultClientOption = new DefaultClientOption();
         Field option = DefaultClientOption.class.getDeclaredField("clientOption");
         option.setAccessible(true);
-        option.set(p, clientOption);
+        option.set(defaultClientOption, clientOption);
 
     }
 
@@ -1011,11 +1019,11 @@ public class CaseKiller {
                 System.out.println("xx");
             }
             if (size > 0) {
-                Map<Integer, Double> vmap = new HashMap<>(size);
+                Map<Integer, Double> valueMap = new HashMap<>(size);
                 for (int i = 0; i < size; i++) {
-                    vmap.put(input.readInt(), input.readDouble(0.01, true));
+                    valueMap.put(input.readInt(), input.readDouble(0.01, true));
                 }
-                this.valMap = vmap;
+                this.valMap = valueMap;
             }
         }
 
@@ -1144,14 +1152,14 @@ public class CaseKiller {
 
         @Override
         public int compareTo(Object o) {
-            PVertex p = (PVertex) o;
-            return Integer.compare(this.id, p.id);
+            PVertex other = (PVertex) o;
+            return Integer.compare(this.id, other.id);
         }
 
         @Override
         public boolean equals(Object o) {
-            PVertex p = (PVertex) o;
-            return this.id == p.id;
+            PVertex other = (PVertex) o;
+            return this.id == other.id;
         }
 
         @Override
@@ -1161,14 +1169,14 @@ public class CaseKiller {
 
         @Override
         public void write(Kryo kryo, Output output) {
-            // serialize id, label and value
+            // serialize id and value
             output.writeInt(this.id, true);
             output.writeString(this.val);
         }
 
         @Override
         public void read(Kryo kryo, Input input) {
-            // deserialize id, label and value
+            // deserialize id and value
             this.id = input.readInt(true);
             this.val = input.readString();
         }
